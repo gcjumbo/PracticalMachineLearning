@@ -9,22 +9,149 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+# Setup
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+For this project, we will install a variety of packages to complete the project.  See below what packages are installed:
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r, echo = FALSE}
+require(readr)
+require(dplyr)
+require(caret)
+require(rpart)
+require(e1071)
+require(ggplot2)
+require(randomForest)
+require(mlbench)
+require(parallel)
+require(doParallel)
 ```
 
-## Including Plots
 
-You can also embed plots, for example:
+To understand the background of this project, let's look at the provided background and project instructions:
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+### Background
+
+> Using devices such as *Jawbone Up*, *Nike FuelBand*, and *Fitbit* it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how *much* of a particular activity they do, but they rarely quantify *how well they do it*. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+### Project Instructions
+
+> The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases.
+
+We are provided with a set of training data and a set of testing data.  Because this is a machine learning project, we will not touch the testing data until we have completed cleaning the training data and creating the model for use in this dataset.  With this in mind, let's go ahead and upload the training data.
+
+```{r}
+har_training <- read_csv("pml-training.csv")
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Note that there is a severe number of columns that do not provide us with any usable information for our project.  We can go ahead and get rid of these columns and keep the ones of our interest.
+
+```{r}
+har_training <- select(har_training, 
+                            classe,
+                            # Belt variables
+                            roll_belt, pitch_belt, yaw_belt, total_accel_belt, gyros_belt_x, gyros_belt_y,
+                            gyros_belt_z, accel_belt_x, accel_belt_y, accel_belt_z, magnet_belt_x, 
+                            magnet_belt_y, magnet_belt_z, 
+                            # Arm variables
+                            roll_arm, pitch_arm, yaw_arm, total_accel_arm, gyros_arm_x, gyros_arm_y, 
+                            gyros_arm_z, accel_arm_x, accel_arm_y, accel_arm_z, magnet_arm_x, magnet_arm_y, 
+                            magnet_arm_z,
+                            # Dumbbell variables
+                            roll_dumbbell, pitch_dumbbell, yaw_dumbbell, total_accel_dumbbell, gyros_dumbbell_x,
+                            gyros_dumbbell_y, gyros_dumbbell_z, accel_dumbbell_x, accel_dumbbell_y,
+                            accel_dumbbell_z, magnet_dumbbell_x, magnet_dumbbell_y, magnet_dumbbell_z,
+                            # Forearm variables
+                            roll_forearm, pitch_forearm, yaw_forearm, total_accel_forearm, gyros_forearm_x,
+                            gyros_forearm_y, gyros_forearm_z, accel_forearm_x, accel_forearm_y, accel_forearm_z,
+                            magnet_forearm_x, magnet_forearm_y, magnet_forearm_z
+                        )
+har_training <- har_training[complete.cases(har_training), ]
+har_training <- har_training[order(har_training$classe), ]
+```
+
+# Analysis
+
+**DISCLAIMER:** Some of the code run in this analysis is computationally expensive, so I had to omit the evaluation of some code chunks.  However, I have listed the code so that results can be reproduced on your own machine.
+
+### Creating a Model 
+
+Let's start off by making a basic classification tree and testing its accuracy.
+
+```{r, eval = FALSE}
+set.seed(100)
+
+modFit <- train(classe ~ ., method = "rpart", data = har_training)
+print(modFit$finalModel)
+rattle::fancyRpartPlot(modFit$finalModel)
+pred <- predict(modFit, newdata = har_training)
+har_training$classe_pred_ClassTree <- pred == har_training$classe
+table(pred, har_training$classe)
+pred_correct_ClassTree <- table(har_training$classe_pred_ClassTree) # Table of correct predictions from classification tree
+z <- 9723 + 9898
+9723 / z # accuracy of only 49.6%
+```
+
+We only obtain a 49% prediction rate when using classification trees.  Let's try and use a random forests method instead.  In this model, we will also input code to include cross-validation of the model (see `fitControl`).
+
+```{r, eval = FALSE}
+x <- har_training[, -1]
+y <- har_training[, 1]
+y <- as.factor(y$classe)
+projClust <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(projClust)
+fitControl <- trainControl(method = "cv",
+                           number = 10,
+                           allowParallel = TRUE)
+fitRandFrst <- train(x, y , method = "rf", data = har_training, trControl = fitControl)
+stopCluster(projClust)
+registerDoSEQ()
+
+# Evaluate the suitability of the model
+fitRandFrst
+fitRandFrst$resample
+confusionMatrix.train(fitRandFrst) # Accuracy of 99.5%
+```
+
+Wow, random forests are amazing.  We can see that the addition of the cross-validation and the switch from regular classification trees to random forests is quite beneficial for our predictions.  With this in mind, let's go ahead and apply this model to our testing dataset.  I guess that the out-of-sample error will be relatively low since we haven't biased our results in any way.  
+
+### Testing a Model
+
+```{r, eval = FALSE}
+har_testing <- read_csv("pml-testing.csv")
+har_testing <- select(har_testing, 
+                        # Belt variables
+                        roll_belt, pitch_belt, yaw_belt, total_accel_belt, gyros_belt_x, gyros_belt_y,
+                        gyros_belt_z, accel_belt_x, accel_belt_y, accel_belt_z, magnet_belt_x, magnet_belt_y,
+                        magnet_belt_z, 
+                        # Arm variables
+                        roll_arm, pitch_arm, yaw_arm, total_accel_arm, gyros_arm_x, gyros_arm_y, gyros_arm_z,
+                        accel_arm_x, accel_arm_y, accel_arm_z, magnet_arm_x, magnet_arm_y, magnet_arm_z,
+                        # Dumbbell variables
+                        roll_dumbbell, pitch_dumbbell, yaw_dumbbell, total_accel_dumbbell, gyros_dumbbell_x,
+                        gyros_dumbbell_y, gyros_dumbbell_z, accel_dumbbell_x, accel_dumbbell_y, 
+                        accel_dumbbell_z, magnet_dumbbell_x, magnet_dumbbell_y, magnet_dumbbell_z,
+                        # Forearm variables
+                        roll_forearm, pitch_forearm, yaw_forearm, total_accel_forearm, gyros_forearm_x,
+                        gyros_forearm_y, gyros_forearm_z, accel_forearm_x, accel_forearm_y, accel_forearm_z,
+                        magnet_forearm_x, magnet_forearm_y, magnet_forearm_z
+                        )
+
+# Predicting new values
+har_testing$classe_predict <- predict(fitRandFrst, newdata = har_testing) 
+predicted_values <- har_testing$classe_predict
+predictions <- data.frame(1:20, predicted_values)
+names(predictions) <- c("case", "predicted class")
+print(predicted_values)
+```
+
+I went ahead and attached the predicted classes to the testing dataset in the end.  This analysis is complete, so we can now use this dataset and see what we get on the course quiz.
+
+UPDATE: Random forests analysis helps you obtain a score of 19/20 on the quiz.  Yay!
+
+# Citations
+
+This project was completed under the guidelines of the Practical Machine Learning Course on Coursera taught by faculty from John Hopkins University.
+
+The data for this project was taken from research on Human Activity Recognition.  The following citation is necessary to credit those who have collected the data:
+
+> Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6. 
